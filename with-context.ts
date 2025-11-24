@@ -40,6 +40,31 @@ import {
   updateFrontmatter as mcpUpdateFrontmatter,
   replaceSection as mcpReplaceSection,
 } from 'with-context-mcp/tools';
+// Config utilities for graceful degradation (separate export path)
+import { loadConfigSafe, isConfigValid, getConfigErrorMessage } from 'with-context-mcp/config';
+
+/**
+ * Helper to wrap tool execution with config validation
+ * Returns a friendly error message if config is invalid instead of crashing
+ */
+function requiresConfig<T>(fn: () => Promise<T>): () => Promise<T | string> {
+  return async () => {
+    if (!isConfigValid()) {
+      const errorMsg = getConfigErrorMessage();
+      return JSON.stringify(
+        {
+          success: false,
+          error: 'WithContext not configured',
+          details: errorMsg,
+          suggestion: 'Run health_check for more details',
+        },
+        null,
+        2
+      );
+    }
+    return fn();
+  };
+}
 
 /**
  * WithContext OpenCode Plugin - Enhanced Version
@@ -53,10 +78,15 @@ import {
  * Current version provides all MCP tools as native OpenCode tools.
  */
 export const WithContextPlugin: Plugin = async ({ project: _project, directory: _directory }) => {
-  // Initialize plugin state
-  const config = {
+  // Check configuration status at plugin load (doesn't throw)
+  const configState = loadConfigSafe();
+
+  // Initialize plugin state with config status
+  const pluginConfig = {
     vaultPath: process.env.OBSIDIAN_VAULT_PATH || process.env.HOME + '/Documents/Vault',
     basePath: process.env.PROJECT_BASE_PATH || 'Projects',
+    isConfigured: configState.isValid,
+    missingConfig: configState.missingFields,
   };
 
   return {
@@ -77,11 +107,38 @@ export const WithContextPlugin: Plugin = async ({ project: _project, directory: 
         description: 'Check WithContext plugin status and configuration',
         args: {},
         async execute(_args, _ctx) {
+          // Re-check config status (in case env vars were set after plugin load)
+          const currentConfigState = loadConfigSafe();
+
+          if (!currentConfigState.isValid) {
+            return JSON.stringify(
+              {
+                status: 'not_configured',
+                version: '3.0.7',
+                config: {
+                  isConfigured: false,
+                  missingFields: currentConfigState.missingFields,
+                  errors: currentConfigState.errors,
+                },
+                message: getConfigErrorMessage(),
+                tools: 32,
+                note: 'WithContext tools are available but will return errors until configured.',
+                next_steps: [
+                  'Set OBSIDIAN_API_KEY environment variable',
+                  'Set OBSIDIAN_VAULT environment variable',
+                  'Run health_check for detailed diagnostics',
+                ],
+              },
+              null,
+              2
+            );
+          }
+
           return JSON.stringify(
             {
               status: 'active',
-              config,
-              version: '3.0.6',
+              config: pluginConfig,
+              version: '3.0.7',
               tools: 32,
               custom_commands: 3,
               features: {
@@ -118,6 +175,20 @@ export const WithContextPlugin: Plugin = async ({ project: _project, directory: 
             ),
         },
         async execute(args, _ctx) {
+          // Check config before execution
+          if (!isConfigValid()) {
+            return JSON.stringify(
+              {
+                success: false,
+                error: 'WithContext not configured',
+                message: getConfigErrorMessage(),
+                suggestion: 'Run with_context_status or health_check for setup instructions',
+              },
+              null,
+              2
+            );
+          }
+
           try {
             const result = await mcpWriteNote({
               path: args.path,
